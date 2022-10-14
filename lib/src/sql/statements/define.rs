@@ -5,7 +5,9 @@ use crate::dbs::Transaction;
 use crate::err::Error;
 use crate::sql::algorithm::{algorithm, Algorithm};
 use crate::sql::base::{base, base_or_scope, Base};
+use crate::sql::comment::mightbespace;
 use crate::sql::comment::shouldbespace;
+use crate::sql::common::commas;
 use crate::sql::duration::{duration, Duration};
 use crate::sql::error::IResult;
 use crate::sql::escape::escape_strand;
@@ -25,6 +27,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag_no_case;
 use nom::combinator::{map, opt};
 use nom::multi::many0;
+use nom::multi::separated_list1;
 use nom::sequence::tuple;
 use rand::distributions::Alphanumeric;
 use rand::rngs::OsRng;
@@ -581,6 +584,7 @@ pub struct DefineTableStatement {
 	pub full: bool,
 	pub view: Option<View>,
 	pub permissions: Permissions,
+	pub fields: Option<Vec<DefineFieldStatement>>,
 }
 
 impl DefineTableStatement {
@@ -635,6 +639,12 @@ impl DefineTableStatement {
 				stm.compute(ctx, opt, txn, doc).await?;
 			}
 		}
+
+		if let Some(fields) = &self.fields {
+			for f in fields {
+				f.compute(ctx, opt, txn, doc).await?;
+			}
+		}
 		// Ok all good
 		Ok(Value::None)
 	}
@@ -669,6 +679,12 @@ fn table(i: &str) -> IResult<&str, DefineTableStatement> {
 	let (i, _) = shouldbespace(i)?;
 	let (i, name) = ident(i)?;
 	let (i, opts) = many0(table_opts)(i)?;
+	let (i, _) = mightbespace(i)?;
+	let(i, _) = tag_no_case("(")(i)?;
+	let (i, _) = mightbespace(i)?;
+	let(i, fields) = opt(table_fields)((i, &name))?;
+	let (i, _) = mightbespace(i.0)?;
+	let(i, _) = tag_no_case(")")(i)?;
 	Ok((
 		i,
 		DefineTableStatement {
@@ -699,9 +715,16 @@ fn table(i: &str) -> IResult<&str, DefineTableStatement> {
 					_ => None,
 				})
 				.unwrap_or_default(),
+			fields: fields
 		},
 	))
 }
+
+fn table_fields<'a>((i, what):(&'a str, &Ident)) -> IResult<(&'a str, &'a Ident), Vec<DefineFieldStatement>> {
+	let (i, v) = separated_list1(commas, field)(i)?;
+	Ok(((i, what), v))
+}
+
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DefineTableOption {
@@ -896,6 +919,38 @@ fn field(i: &str) -> IResult<&str, DefineFieldStatement> {
 	let (i, _) = opt(tuple((shouldbespace, tag_no_case("TABLE"))))(i)?;
 	let (i, _) = shouldbespace(i)?;
 	let (i, what) = ident(i)?;
+	let (i, opts) = many0(field_opts)(i)?;
+	Ok((
+		i,
+		DefineFieldStatement {
+			name,
+			what,
+			kind: opts.iter().find_map(|x| match x {
+				DefineFieldOption::Kind(ref v) => Some(v.to_owned()),
+				_ => None,
+			}),
+			value: opts.iter().find_map(|x| match x {
+				DefineFieldOption::Value(ref v) => Some(v.to_owned()),
+				_ => None,
+			}),
+			assert: opts.iter().find_map(|x| match x {
+				DefineFieldOption::Assert(ref v) => Some(v.to_owned()),
+				_ => None,
+			}),
+			permissions: opts
+				.iter()
+				.find_map(|x| match x {
+					DefineFieldOption::Permissions(ref v) => Some(v.to_owned()),
+					_ => None,
+				})
+				.unwrap_or_default(),
+		},
+	))
+}
+
+fn table_field(i: &str) -> IResult<&str, DefineFieldStatement> {
+	let (i, name) = idiom::local(i)?;
+	let (i, _) = shouldbespace(i)?;
 	let (i, opts) = many0(field_opts)(i)?;
 	Ok((
 		i,
